@@ -65,7 +65,22 @@ class SystemPromptInfluenceAnalyzer:
         """Analyze influence for a single agent response"""
         analysis_prompt = f"""
         Analyze how the system prompt and previous customer message influenced this specific agent response.
-        
+        Return your analysis in the following JSON format, and ONLY in this format:
+
+        {{
+            "system_prompt_influences": [
+                {{
+                    "segment": "exact text from system prompt",
+                    "score": 0.8,
+                    "explanation": "why this segment influenced the response"
+                }}
+            ],
+            "customer_message_influence": {{
+                "score": 0.7,
+                "explanation": "how customer message influenced response"
+            }}
+        }}
+
         System Prompt:
         {system_prompt}
         
@@ -74,30 +89,6 @@ class SystemPromptInfluenceAnalyzer:
         
         Agent Response:
         {agent_response}
-        
-        Provide a JSON response with:
-        1. system_prompt_influences: List of objects containing:
-           - segment: exact text from system prompt
-           - score: influence score (0-1.0)
-           - explanation: why this segment influenced the response
-        2. customer_message_influence: Object containing:
-           - score: influence score (0-1.0)
-           - explanation: how customer message influenced response
-        
-        Example format:
-        {
-            "system_prompt_influences": [
-                {
-                    "segment": "exact text",
-                    "score": 0.8,
-                    "explanation": "explanation text"
-                }
-            ],
-            "customer_message_influence": {
-                "score": 0.7,
-                "explanation": "explanation text"
-            }
-        }
         """
         
         try:
@@ -105,23 +96,55 @@ class SystemPromptInfluenceAnalyzer:
                 response = self.anthropic_client.messages.create(
                     model=selected_model,
                     max_tokens=4000,
-                    messages=[{"role": "user", "content": analysis_prompt}]
+                    messages=[{
+                        "role": "user", 
+                        "content": analysis_prompt
+                    }],
+                    temperature=0.2
                 )
-                analysis = json.loads(response.content[0].text)
+                # Extract JSON from the response
+                response_text = response.content[0].text
+                # Find the JSON block
+                start_idx = response_text.find('{')
+                end_idx = response_text.rfind('}') + 1
+                if start_idx != -1 and end_idx != -1:
+                    json_str = response_text[start_idx:end_idx]
+                    analysis = json.loads(json_str)
+                else:
+                    raise ValueError("Could not find valid JSON in response")
+
             else:  # OpenAI
                 response = self.openai_client.chat.completions.create(
                     model=selected_model,
                     messages=[
-                        {"role": "system", "content": "You are an expert in analyzing AI system prompts and their influence on conversations."},
-                        {"role": "user", "content": analysis_prompt}
+                        {
+                            "role": "system",
+                            "content": "You are an expert in analyzing AI system prompts. Always respond with valid JSON."
+                        },
+                        {
+                            "role": "user",
+                            "content": analysis_prompt
+                        }
                     ],
                     max_tokens=4000,
                     temperature=0.2
                 )
-                analysis = json.loads(response.choices[0].message.content)
-                
+                # Extract JSON from the response
+                response_text = response.choices[0].message.content
+                # Find the JSON block
+                start_idx = response_text.find('{')
+                end_idx = response_text.rfind('}') + 1
+                if start_idx != -1 and end_idx != -1:
+                    json_str = response_text[start_idx:end_idx]
+                    analysis = json.loads(json_str)
+                else:
+                    raise ValueError("Could not find valid JSON in response")
+
             return analysis
             
+        except json.JSONDecodeError as e:
+            st.error(f"Error parsing JSON response: {e}")
+            return None
         except Exception as e:
             st.error(f"Error in analysis: {e}")
             return None
@@ -138,7 +161,7 @@ def render_conversation_message(message: Message, index: int, analyzer: SystemPr
             with message_container:
                 st.markdown(f"```\n{message.content}\n```")
                 
-            if st.button(f"Analyze Response {index}"):
+            if st.button(f"Analyze Response {index}", key=f"analyze_button_{index}"):
                 previous_customer_message = ""
                 if index > 0 and messages[index-1].role == "Customer":
                     previous_customer_message = messages[index-1].content
@@ -153,7 +176,6 @@ def render_conversation_message(message: Message, index: int, analyzer: SystemPr
                     )
                     
                 if analysis:
-                    # Update session state with analysis results
                     st.session_state.current_analysis = analysis
                     st.experimental_rerun()
     else:  # Customer message
@@ -167,17 +189,18 @@ def highlight_system_prompt(system_prompt: str, analysis: Dict) -> None:
         return
         
     highlighted_text = system_prompt
-    for influence in analysis["system_prompt_influences"]:
-        segment = influence["segment"]
-        score = influence["score"]
+    for influence in analysis.get("system_prompt_influences", []):
+        segment = influence.get("segment", "")
+        score = influence.get("score", 0)
         
-        # Convert score to RGB color (darker blue for higher influence)
-        color = f"rgb({int(255 * (1-score))}, {int(255 * (1-score))}, 255)"
-        
-        highlighted_text = highlighted_text.replace(
-            segment,
-            f'<span style="background-color: {color};">{segment}</span>'
-        )
+        if segment and score:
+            # Convert score to RGB color (darker blue for higher influence)
+            color = f"rgb({int(255 * (1-score))}, {int(255 * (1-score))}, 255)"
+            
+            highlighted_text = highlighted_text.replace(
+                segment,
+                f'<span style="background-color: {color};">{segment}</span>'
+            )
     
     st.markdown(highlighted_text, unsafe_allow_html=True)
 
@@ -185,12 +208,12 @@ def main():
     st.set_page_config(layout="wide")
     st.title("Interactive System Prompt Analyzer")
     
-    # Initialize analyzer
-    analyzer = SystemPromptInfluenceAnalyzer()
-    
     # Initialize session state
     if 'current_analysis' not in st.session_state:
         st.session_state.current_analysis = None
+    
+    # Initialize analyzer
+    analyzer = SystemPromptInfluenceAnalyzer()
     
     # Model selection in sidebar
     st.sidebar.header("Model Selection")
@@ -207,6 +230,9 @@ def main():
     # File upload or direct input
     use_direct_input = st.checkbox("Use direct text input")
     
+    system_prompt = ""
+    conversation_log = ""
+    
     if use_direct_input:
         system_prompt = st.text_area("System Prompt", height=200)
         conversation_log = st.text_area("Conversation Log", height=200)
@@ -217,37 +243,38 @@ def main():
         if system_prompt_file and conversation_log_file:
             system_prompt = system_prompt_file.getvalue().decode('utf-8')
             conversation_log = conversation_log_file.getvalue().decode('utf-8')
-        else:
-            st.warning("Please upload both files to continue")
-            return
     
-    # Create two-column layout
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.header("System Prompt")
-        if st.session_state.current_analysis:
-            highlight_system_prompt(system_prompt, st.session_state.current_analysis)
-            
-            if st.session_state.current_analysis["customer_message_influence"]["score"] > 0:
-                st.markdown("### Relevant Customer Context")
-                st.markdown(f"""
-                Influence Score: {st.session_state.current_analysis["customer_message_influence"]["score"]}
-                
-                {st.session_state.current_analysis["customer_message_influence"]["explanation"]}
-                """)
-        else:
-            st.markdown(system_prompt)
-    
-    with col2:
-        st.header("Conversation")
-        messages = analyzer.parse_conversation(conversation_log)
+    if system_prompt and conversation_log:
+        # Create two-column layout
+        col1, col2 = st.columns(2)
         
-        for idx, message in enumerate(messages):
-            render_conversation_message(
-                message, idx, analyzer, system_prompt, messages,
-                provider, model
-            )
+        with col1:
+            st.header("System Prompt")
+            if st.session_state.current_analysis:
+                highlight_system_prompt(system_prompt, st.session_state.current_analysis)
+                
+                customer_influence = st.session_state.current_analysis.get("customer_message_influence", {})
+                if customer_influence.get("score", 0) > 0:
+                    st.markdown("### Relevant Customer Context")
+                    st.markdown(f"""
+                    Influence Score: {customer_influence.get("score", 0)}
+                    
+                    {customer_influence.get("explanation", "")}
+                    """)
+            else:
+                st.markdown(system_prompt)
+        
+        with col2:
+            st.header("Conversation")
+            messages = analyzer.parse_conversation(conversation_log)
+            
+            for idx, message in enumerate(messages):
+                render_conversation_message(
+                    message, idx, analyzer, system_prompt, messages,
+                    provider, model
+                )
+    else:
+        st.warning("Please provide both system prompt and conversation log to continue")
 
 if __name__ == "__main__":
     main()
