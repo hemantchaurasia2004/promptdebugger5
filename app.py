@@ -161,7 +161,15 @@ def render_conversation_message(message: Message, index: int, analyzer: SystemPr
             with message_container:
                 st.markdown(f"```\n{message.content}\n```")
                 
-            if st.button(f"Analyze Response {index}", key=f"analyze_button_{index}"):
+            # Create a unique key for each analysis button and state
+            button_key = f"analyze_button_{index}"
+            state_key = f"analysis_state_{index}"
+            
+            # Initialize the analysis state for this message if it doesn't exist
+            if state_key not in st.session_state:
+                st.session_state[state_key] = None
+                
+            if st.button(f"Analyze Response {index}", key=button_key):
                 previous_customer_message = ""
                 if index > 0 and messages[index-1].role == "Customer":
                     previous_customer_message = messages[index-1].content
@@ -176,33 +184,11 @@ def render_conversation_message(message: Message, index: int, analyzer: SystemPr
                     )
                     
                 if analysis:
+                    st.session_state[state_key] = analysis
                     st.session_state.current_analysis = analysis
-                    st.experimental_rerun()
     else:  # Customer message
         st.markdown("### Customer Message")
         st.markdown(f"```\n{message.content}\n```")
-
-def highlight_system_prompt(system_prompt: str, analysis: Dict) -> None:
-    """Render system prompt with highlighted segments based on influence scores"""
-    if not analysis:
-        st.markdown(system_prompt)
-        return
-        
-    highlighted_text = system_prompt
-    for influence in analysis.get("system_prompt_influences", []):
-        segment = influence.get("segment", "")
-        score = influence.get("score", 0)
-        
-        if segment and score:
-            # Convert score to RGB color (darker blue for higher influence)
-            color = f"rgb({int(255 * (1-score))}, {int(255 * (1-score))}, 255)"
-            
-            highlighted_text = highlighted_text.replace(
-                segment,
-                f'<span style="background-color: {color};">{segment}</span>'
-            )
-    
-    st.markdown(highlighted_text, unsafe_allow_html=True)
 
 def main():
     st.set_page_config(layout="wide")
@@ -211,7 +197,7 @@ def main():
     # Initialize session state
     if 'current_analysis' not in st.session_state:
         st.session_state.current_analysis = None
-    
+        
     # Initialize analyzer
     analyzer = SystemPromptInfluenceAnalyzer()
     
@@ -219,26 +205,28 @@ def main():
     st.sidebar.header("Model Selection")
     provider = st.sidebar.selectbox(
         "Select Provider",
-        options=list(analyzer.model_providers.keys())
+        options=list(analyzer.model_providers.keys()),
+        key="provider_select"
     )
     model = st.sidebar.selectbox(
         "Select Model",
         options=list(analyzer.model_providers[provider].keys()),
-        format_func=lambda x: analyzer.model_providers[provider][x]
+        format_func=lambda x: analyzer.model_providers[provider][x],
+        key="model_select"
     )
     
     # File upload or direct input
-    use_direct_input = st.checkbox("Use direct text input")
+    use_direct_input = st.checkbox("Use direct text input", key="use_direct_input")
     
     system_prompt = ""
     conversation_log = ""
     
     if use_direct_input:
-        system_prompt = st.text_area("System Prompt", height=200)
-        conversation_log = st.text_area("Conversation Log", height=200)
+        system_prompt = st.text_area("System Prompt", height=200, key="system_prompt_input")
+        conversation_log = st.text_area("Conversation Log", height=200, key="conversation_log_input")
     else:
-        system_prompt_file = st.file_uploader("Upload System Prompt", type=['txt'])
-        conversation_log_file = st.file_uploader("Upload Conversation Log", type=['txt'])
+        system_prompt_file = st.file_uploader("Upload System Prompt", type=['txt'], key="system_prompt_file")
+        conversation_log_file = st.file_uploader("Upload Conversation Log", type=['txt'], key="conversation_log_file")
         
         if system_prompt_file and conversation_log_file:
             system_prompt = system_prompt_file.getvalue().decode('utf-8')
@@ -273,8 +261,6 @@ def main():
                     message, idx, analyzer, system_prompt, messages,
                     provider, model
                 )
-    else:
-        st.warning("Please provide both system prompt and conversation log to continue")
 
 if __name__ == "__main__":
     main()
